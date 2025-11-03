@@ -11,29 +11,738 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <!-- Load Babel to process JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
     <!-- Load Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // UPDATED: Added GoogleAuthProvider, signInWithPopup, signOut
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { 
             getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, query, limit, where, getDocs, runTransaction, deleteDoc 
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Expose Firebase modules globally for use in the script type="text/babel" block
         window.firebase = {
-            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+            initializeApp, getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
             getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, query, limit, where, getDocs, runTransaction, deleteDoc
         };
 
         // Wait for all scripts to load, then attempt to render the app
         window.addEventListener('load', () => {
-            // This is a safety check to ensure the React script runs after Firebase is loaded
             if (window.renderApp) {
                 window.renderApp();
             }
         });
     </script>
     <style>
+        html, body {
+            font-family: 'Inter', sans-serif;
+        }
+        .signout-button:hover svg {
+            transform: translateX(-2px);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const React = window.React;
+        const ReactDOM = window.ReactDOM;
+
+        // --- HARDCODED FIREBASE CONFIGURATION (Using your provided details) ---
+        const REAL_FIREBASE_CONFIG = {
+          apiKey: "AIzaSyDRLzbqxnbz4ADiPJ2ub-IGU9rvueA0DJQ",
+          authDomain: "medical-quiz-battle.firebaseapp.com",
+          projectId: "medical-quiz-battle",
+          storageBucket: "medical-quiz-battle.firebasestorage.app",
+          messagingSenderId: "282470098201",
+          appId: "1:282470098201:web:781561dc69730dd6211188",
+          measurementId: "G-EXVPX5XTT6"
+        };
+        const REAL_APP_ID = "medical-quiz-battle";
+
+        // Overwrite the dynamic global variables
+        const appId = REAL_APP_ID;
+        const firebaseConfig = REAL_FIREBASE_CONFIG;
+        const initialAuthToken = null;
+
+        // Destructure Firebase functions from the global window object
+        const {
+            initializeApp, getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+            getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, query, limit, where, getDocs, runTransaction, deleteDoc
+        } = window.firebase || {};
+
+
+        // Game Constants
+        const ENTRY_FEE = 10;
+        const WINNER_PRIZE = 15;
+        const QUESTION_COUNT = 5;
+        const QUESTION_TIME_LIMIT = 15;
+
+        const MEDICAL_QUESTIONS = [
+          { id: 1, q: "Which cranial nerve is primarily responsible for the sensation of taste from the anterior two-thirds of the tongue?", options: ["Trigeminal (V)", "Facial (VII)", "Glossopharyngeal (IX)", "Vagus (X)"], answer: "Facial (VII)" },
+          { id: 2, q: "What is the most common cause of community-acquired pneumonia?", options: ["Mycoplasma pneumoniae", "Staphylococcus aureus", "Streptococcus pneumoniae", "Klebsiella pneumoniae"], answer: "Streptococcus pneumoniae" },
+          { id: 3, q: "The ductus arteriosus connects which two major blood vessels in the fetal circulation?", options: ["Aorta and Pulmonary Artery", "Aorta and Vena Cava", "Pulmonary Artery and Pulmonary Vein", "Umbilical Artery and Internal Iliac Artery"], answer: "Aorta and Pulmonary Artery" },
+          { id: 4, q: "Where does the process of filtration primarily occur in the kidney?", options: ["Loop of Henle", "Distal Convoluted Tubule", "Proximal Convoluted Tubule", "Glomerulus"], answer: "Glomerulus" },
+          { id: 5, q: "What is the primary action of the drug Warfarin?", options: ["Direct Thrombin Inhibitor", "Factor Xa Inhibitor", "Vitamin K Epoxide Reductase Inhibitor", "P2Y12 Receptor Blocker"], answer: "Vitamin K Epoxide Reductase Inhibitor" },
+          { id: 6, q: "Which electrolyte imbalance is classically associated with the presence of U-waves on an ECG?", options: ["Hyperkalemia", "Hypocalcemia", "Hypokalemia", "Hypernatremia"], answer: "Hypokalemia" },
+          { id: 7, q: "What is the term for the surgical removal of the gallbladder?", options: ["Appendectomy", "Cholecystectomy", "Hysterectomy", "Nephrectomy"], answer: "Cholecystectomy" },
+          { id: 8, q: "The primary muscle responsible for inspiration is the:", options: ["Intercostal muscles", "Sternocleidomastoid", "Trapezius", "Diaphragm"], answer: "Diaphragm" },
+          { id: 9, q: "In which part of the small intestine are most nutrients absorbed?", options: ["Duodenum", "Jejunum", "Ileum", "Cecum"], answer: "Jejunum" },
+          { id: 10, q: "A patient presents with a 'sunburst' pattern on X-ray, characteristic of which bone tumor?", options: ["Osteochondroma", "Ewing's Sarcoma", "Osteosarcoma", "Multiple Myeloma"], answer: "Osteosarcoma" },
+        ];
+
+
+        let db, auth;
+        if (firebaseConfig) {
+          const app = initializeApp(firebaseConfig);
+          db = getFirestore(app);
+          auth = getAuth(app);
+        }
+
+        const useFirebase = () => {
+          const [userId, setUserId] = React.useState(null);
+          const [displayName, setDisplayName] = React.useState(null);
+          const [balance, setBalance] = React.useState(0);
+          const [isAuthReady, setIsAuthReady] = React.useState(false);
+          const [error, setError] = React.useState(null);
+
+          // NEW: Function to handle Google Sign-In
+          const signInWithGoogle = React.useCallback(async () => {
+            if (!auth) return;
+            try {
+              const provider = new GoogleAuthProvider();
+              await signInWithPopup(auth, provider);
+            } catch (e) {
+              console.error("Google Sign-In error:", e);
+              setError("Google Sign-In failed.");
+            }
+          }, [auth]);
+
+          // NEW: Function to handle Sign Out
+          const handleSignOut = React.useCallback(async () => {
+            if (!auth) return;
+            try {
+                await signOut(auth);
+                setDisplayName(null);
+                setUserId(null);
+                setBalance(0);
+            } catch (e) {
+                console.error("Sign-out error:", e);
+                setError("Sign-out failed.");
+            }
+          }, [auth]);
+
+          // 1. Auth Listener and Initialization (Runs when Firebase loads)
+          React.useEffect(() => {
+            if (!db || !auth) return;
+
+            const unsubscribe = onAuthStateChanged(auth, async (user) => {
+              if (user) {
+                setUserId(user.uid);
+                setDisplayName(user.displayName || 'Medical Student');
+                
+                const balanceRef = doc(db, `artifacts/${appId}/users/${user.uid}/balances/main`);
+                try {
+                  await runTransaction(db, async (transaction) => {
+                    const balanceDoc = await transaction.get(balanceRef);
+                    if (!balanceDoc.exists()) {
+                      transaction.set(balanceRef, { balance: 50 });
+                      setBalance(50);
+                    } else {
+                      setBalance(balanceDoc.data().balance);
+                    }
+                  });
+                } catch (e) {
+                  console.error("Balance initialization error:", e);
+                  setError("Failed to initialize user data.");
+                }
+              } else {
+                setUserId(null);
+                setDisplayName(null);
+              }
+              setIsAuthReady(true);
+            });
+
+            return () => unsubscribe();
+          }, []);
+
+          // 2. Real-time Balance Listener
+          React.useEffect(() => {
+            if (!db || !userId || !isAuthReady) return;
+
+            const balanceRef = doc(db, `artifacts/${appId}/users/${userId}/balances/main`);
+
+            const unsubscribe = onSnapshot(balanceRef, (doc) => {
+              if (doc.exists()) {
+                setBalance(doc.data().balance);
+              }
+            }, (e) => {
+              console.error("Balance snapshot error:", e);
+              setError("Failed to fetch real-time balance.");
+            });
+
+            return () => unsubscribe();
+          }, [userId, isAuthReady]);
+
+          const updateBalance = React.useCallback(async (amount) => {
+            if (!db || !userId) return false;
+
+            const balanceRef = doc(db, `artifacts/${appId}/users/${userId}/balances/main`);
+
+            try {
+              await runTransaction(db, async (transaction) => {
+                const balanceDoc = await transaction.get(balanceRef);
+                if (!balanceDoc.exists()) {
+                  throw new Error("Balance document not found.");
+                }
+                const currentBalance = balanceDoc.data().balance;
+                const newBalance = currentBalance + amount;
+
+                if (newBalance < 0) {
+                  throw new Error("Insufficient funds for this operation.");
+                }
+
+                transaction.update(balanceRef, { balance: newBalance });
+              });
+              return true;
+            } catch (e) {
+              console.error("Transaction failed:", e.message);
+              setError(e.message);
+              return false;
+            }
+          }, [userId]);
+
+          return { userId, displayName, balance, isAuthReady, updateBalance, error, db, signInWithGoogle, handleSignOut };
+        };
+
+        // --- COMPONENTS ---
+        const Matchmaking = ({ userId, db, balance, updateBalance, setMatchId, signInWithGoogle }) => {
+          // If no user is logged in, show the sign-in screen
+          if (!userId) {
+            return (
+                <div className="text-center p-8 bg-gray-800 rounded-xl shadow-2xl backdrop-blur-sm max-w-sm mx-auto">
+                    <h2 className="text-3xl font-extrabold text-white mb-4">Welcome to MedQuiz Duel</h2>
+                    <p className="text-lg text-indigo-300 mb-6">Sign in to start battling!</p>
+                    <button
+                        onClick={signInWithGoogle}
+                        className="w-full py-3 px-6 bg-indigo-600 hover:bg-indigo-700 transition duration-300 rounded-lg shadow-lg text-white text-lg font-bold flex items-center justify-center"
+                    >
+                        <svg className="w-5 h-5 mr-3" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12.48,10.74,15.6,8.87a6,6,0,0,0-9.82-3.11l3.39,2.46c.55-.13,1.13-.2,1.72-.2a3.83,3.83,0,0,1,3.22,1.72Zm1.6,4.78a6,6,0,0,0-1.84,1.49,6,6,0,0,0,1.84-1.49l-3.39-2.46c-.55.13-1.13.2-1.72.2a3.83,3.83,0,0,1-3.22-1.72l-3.22,2.34a6,6,0,0,0,9.65,1.55ZM12,6a6,6,0,0,0-5.65,3.95l3.22,2.34a3.83,3.83,0,0,1,4.86,0l3.22-2.34A6,6,0,0,0,12,6Z"/>
+                        </svg>
+                        Sign in with Google
+                    </button>
+                </div>
+            );
+          }
+
+          // Existing Matchmaking logic for authenticated users
+          const [isSearching, setIsSearching] = React.useState(false);
+          const [lobbyDocId, setLobbyDocId] = React.useState(null);
+          const [insufficientFunds, setInsufficientFunds] = React.useState(false); 
+
+          const lobbyRef = React.useMemo(() => collection(db, `artifacts/${appId}/public/data/quiz_lobby`), [db]);
+          const matchesRef = React.useMemo(() => collection(db, `artifacts/${appId}/public/data/quiz_matches`), [db]);
+
+          const enterLobby = React.useCallback(async () => {
+            if (balance < ENTRY_FEE) {
+              setInsufficientFunds(true);
+              setTimeout(() => setInsufficientFunds(false), 3000); 
+              return;
+            }
+            
+            setInsufficientFunds(false);
+
+            setIsSearching(true);
+            const success = await updateBalance(-ENTRY_FEE);
+
+            if (!success) {
+              setIsSearching(false);
+              return;
+            }
+
+            try {
+              const q = query(lobbyRef, where("userId", "!=", userId), limit(1));
+              const opponentSnapshot = await getDocs(q);
+
+              if (!opponentSnapshot.empty) {
+                const opponentDoc = opponentSnapshot.docs[0];
+                const opponentId = opponentDoc.data().userId;
+
+                // Player 2 marks Player 1's lobby entry as 'matched'
+                await setDoc(doc(lobbyRef, opponentDoc.id), { userId: opponentId, status: 'matched' }, { merge: true });
+
+                const newMatchRef = doc(matchesRef);
+                const shuffledQuestions = [...MEDICAL_QUESTIONS].sort(() => 0.5 - Math.random()).slice(0, QUESTION_COUNT);
+
+                await setDoc(newMatchRef, {
+                  player1: { id: opponentId, score: 0, answers: {} },
+                  player2: { id: userId, score: 0, answers: {} },
+                  questions: shuffledQuestions,
+                  currentQIndex: 0,
+                  status: 'active',
+                  startTime: Date.now(),
+                  lastActionTime: Date.now(),
+                  turn: opponentId,
+                  entryFee: ENTRY_FEE,
+                  winnerPrize: WINNER_PRIZE,
+                });
+
+                setMatchId(newMatchRef.id);
+                setIsSearching(false);
+                setLobbyDocId(null);
+
+              } else {
+                // Player 1 enters the lobby
+                const newLobbyRef = doc(lobbyRef);
+                await setDoc(newLobbyRef, { userId: userId, timestamp: Date.now(), status: 'waiting' });
+                setLobbyDocId(newLobbyRef.id);
+              }
+            } catch (e) {
+              console.error("Matchmaking error:", e);
+              await updateBalance(ENTRY_FEE);
+              setIsSearching(false);
+            }
+          }, [userId, db, balance, updateBalance, lobbyRef, matchesRef, setMatchId]);
+
+          React.useEffect(() => {
+            if (!lobbyDocId || !db) return;
+
+            const lobbyDocRef = doc(lobbyRef, lobbyDocId);
+
+            // Player 1 listens for their lobby entry status to change
+            const unsubscribe = onSnapshot(lobbyDocRef, async (docSnapshot) => {
+              if (docSnapshot.exists() && docSnapshot.data().status === 'matched') {
+                
+                // Player 1 finds the match that includes them
+                const q = query(matchesRef, where("player1.id", "==", userId), where("status", "==", 'active'), limit(1));
+                const matchSnapshot = await getDocs(q);
+                
+                if (!matchSnapshot.empty) {
+                  const newMatchId = matchSnapshot.docs[0].id;
+                  setMatchId(newMatchId);
+                  
+                  // Player 1 deletes their OWN lobby document (secure)
+                  try {
+                    await deleteDoc(lobbyDocRef); 
+                  } catch(e) {
+                    console.error("Failed to delete own lobby document (expected if already deleted):", e);
+                  }
+                  
+                  setIsSearching(false);
+                  setLobbyDocId(null);
+                }
+              }
+            }, (e) => console.error("Lobby listener error:", e));
+
+            // Clean up: Delete own lobby entry if component unmounts
+            return () => {
+              unsubscribe();
+              if (lobbyDocId && auth.currentUser) {
+                  deleteDoc(lobbyDocRef).catch(() => {}); 
+              }
+            };
+          }, [lobbyDocId, userId, db, lobbyRef, matchesRef, setMatchId, auth]);
+
+          // Check if user is already in an active match
+          React.useEffect(() => {
+            if (!userId || !db) return;
+
+            const checkActiveMatch = async () => {
+              const q1 = query(matchesRef, where("player1.id", "==", userId), where("status", "==", 'active'), limit(1));
+              const q2 = query(matchesRef, where("player2.id", "==", userId), where("status", "==", 'active'), limit(1));
+
+              const [snap1, snap2] = await Promise.all([getDocs(q1), getDocs(q2)]);
+
+              if (!snap1.empty) {
+                setMatchId(snap1.docs[0].id);
+              } else if (!snap2.empty) {
+                setMatchId(snap2.docs[0].id);
+              }
+            };
+            checkActiveMatch();
+          }, [userId, db, matchesRef, setMatchId]);
+
+          return (
+            <div className="text-center p-8 bg-white/10 rounded-xl shadow-2xl backdrop-blur-sm">
+              <h2 className="text-3xl font-extrabold text-indigo-300 mb-4">Quiz Battle Lobby</h2>
+              <p className="text-lg text-gray-200 mb-6">Compete in a head-to-head medical quiz!</p>
+              
+              {insufficientFunds && (
+                  <div className="p-3 mb-4 bg-red-500 rounded-lg text-white font-semibold animate-pulse">
+                    Insufficient Balance. You need at least {ENTRY_FEE} Rs.
+                  </div>
+              )}
+
+              {!isSearching && (
+                <button
+                  onClick={enterLobby}
+                  className="w-full py-4 px-6 bg-green-500 hover:bg-green-600 transition duration-300 rounded-lg shadow-lg text-white text-xl font-bold disabled:bg-gray-500"
+                >
+                  Start Match (Entry Fee: {ENTRY_FEE} Rs)
+                </button>
+              )}
+
+              {isSearching && (
+                <div className="flex flex-col items-center">
+                  <svg className="animate-spin h-10 w-10 text-indigo-400 mb-4" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <p className="text-xl text-indigo-300 font-semibold">Searching for Opponent...</p>
+                  <p className="text-sm text-gray-400 mt-2">Waiting for another medical student to join.</p>
+                </div>
+              )}
+            </div>
+          );
+        };
+
+        const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
+          const [match, setMatch] = React.useState(null);
+          const [userRole, setUserRole] = React.useState(null);
+          const [timeRemaining, setTimeRemaining] = React.useState(QUESTION_TIME_LIMIT);
+          const [selectedOption, setSelectedOption] = React.useState(null);
+          const [loading, setLoading] = React.useState(true);
+
+          const matchRef = React.useMemo(() => matchId ? doc(db, `artifacts/${appId}/public/data/quiz_matches`, matchId) : null, [db, matchId]);
+
+          React.useEffect(() => {
+            if (!matchRef) return;
+
+            const unsubscribe = onSnapshot(matchRef, (docSnapshot) => {
+              setLoading(false);
+              if (docSnapshot.exists()) {
+                const data = docSnapshot.data();
+                setMatch(data);
+
+                if (data.player1.id === userId) {
+                  setUserRole('player1');
+                } else if (data.player2.id === userId) {
+                  setUserRole('player2');
+                }
+
+                const currentQIndex = data.currentQIndex || 0;
+                const myRole = data.player1.id === userId ? 'player1' : data.player2.id === userId ? 'player2' : null;
+
+                if (myRole) {
+                    const myAnswer = data[myRole]?.answers?.[currentQIndex];
+                    setSelectedOption(myAnswer || null);
+                } else {
+                     console.error("Could not determine user role in match.");
+                }
+                
+              } else {
+                setMatchId(null);
+              }
+            }, (e) => {
+              console.error("Match snapshot error:", e);
+            });
+
+            return () => unsubscribe();
+          }, [matchRef, userId, setMatchId]);
+
+          React.useEffect(() => {
+            if (!match || match.status !== 'active' || !userRole) return;
+
+            const currentQIndex = match.currentQIndex || 0;
+            const myAnswer = match[userRole]?.answers?.[currentQIndex];
+            if (selectedOption !== myAnswer) {
+                setSelectedOption(myAnswer || null);
+            }
+            
+            const questionStartTime = match.lastActionTime;
+            const interval = setInterval(() => {
+              const elapsed = Math.floor((Date.now() - questionStartTime) / 1000);
+              const remaining = QUESTION_TIME_LIMIT - elapsed;
+
+              setTimeRemaining(Math.max(0, remaining));
+
+              if (remaining <= 0) {
+                clearInterval(interval);
+                if (match[userRole]?.answers?.[currentQIndex] === undefined) {
+                  handleSubmitAnswer(null);
+                }
+              }
+            }, 1000);
+
+            return () => clearInterval(interval);
+          }, [match?.lastActionTime, match?.status, match?.currentQIndex, userRole]);
+
+
+          const handleSubmitAnswer = React.useCallback(async (answer) => {
+            if (!matchRef || !match || match.status !== 'active' || match[userRole]?.answers?.[match.currentQIndex] !== undefined) return;
+
+            const currentQ = match.questions[match.currentQIndex];
+            const isCorrect = answer === currentQ.answer;
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const matchDoc = await transaction.get(matchRef);
+                    if (!matchDoc.exists() || matchDoc.data().status !== 'active') {
+                        return; 
+                    }
+                    const currentMatch = matchDoc.data();
+                    const currentQIndex = currentMatch.currentQIndex;
+
+                    if (currentMatch[userRole].answers.hasOwnProperty(currentQIndex)) {
+                        return; 
+                    }
+
+                    const updatedAnswers = {
+                        ...currentMatch[userRole].answers,
+                        [currentQIndex]: answer,
+                    };
+
+                    const newScore = currentMatch[userRole].score + (isCorrect ? 1 : 0);
+                    
+                    transaction.update(matchRef, {
+                        [`${userRole}.answers`]: updatedAnswers,
+                        [`${userRole}.score`]: newScore,
+                        lastActionTime: Date.now(),
+                    });
+
+                    const opponentRole = userRole === 'player1' ? 'player2' : 'player1';
+                    const opponentAnswered = currentMatch[opponentRole].answers.hasOwnProperty(currentQIndex);
+
+                    if (opponentAnswered) {
+                        const nextQIndex = currentQIndex + 1;
+
+                        if (nextQIndex < QUESTION_COUNT) {
+                            transaction.update(matchRef, {
+                                currentQIndex: nextQIndex,
+                                lastActionTime: Date.now(),
+                            });
+                        } else {
+                            let winnerId = null;
+                            const finalP1Score = currentMatch.player1.score + (userRole === 'player1' ? (newScore - currentMatch.player1.score) : 0);
+                            const finalP2Score = currentMatch.player2.score + (userRole === 'player2' ? (newScore - currentMatch.player2.score) : 0);
+
+                            if (finalP1Score > finalP2Score) {
+                                winnerId = currentMatch.player1.id;
+                            } else if (finalP2Score > finalP1Score) {
+                                winnerId = currentMatch.player2.id;
+                            }
+
+                            transaction.update(matchRef, {
+                                status: 'completed',
+                                winnerId: winnerId,
+                                'player1.score': finalP1Score,
+                                'player2.score': finalP2Score,
+                                completedAt: Date.now(),
+                            });
+                            
+                            if (winnerId) {
+                                await awardWinner(winnerId);
+                            }
+                        }
+                    }
+                });
+
+            } catch (e) {
+              console.error("Answer submission transaction error:", e);
+            }
+          }, [matchRef, match, userRole, db]);
+
+
+          const awardWinner = React.useCallback(async (winnerId) => {
+            if (winnerId === userId) {
+                try {
+                    await updateBalance(WINNER_PRIZE); 
+                } catch (e) {
+                    console.error("Failed to award prize:", e);
+                }
+            }
+          }, [db, updateBalance, userId]);
+
+          if (loading) {
+            return <div className="text-center p-8 text-white">Loading Match Data...</div>;
+          }
+
+          if (!match || !userRole) {
+            return <div className="text-center p-8 text-white">Match data is unavailable or incomplete.</div>;
+          }
+
+          const opponentRole = userRole === 'player1' ? 'player2' : 'player1';
+          const opponent = match[opponentRole];
+
+          if (match.status === 'completed') {
+            const winnerId = match.winnerId;
+            let resultMessage = "It's a Draw!";
+            let resultStyle = "bg-yellow-600";
+            const netGain = WINNER_PRIZE - ENTRY_FEE;
+
+            if (winnerId === userId) {
+                resultMessage = `You Won! (Net +${netGain} Rs)`;
+                resultStyle = "bg-green-600";
+            } else if (winnerId) {
+                resultMessage = `You Lost! (Entry Fee: -${ENTRY_FEE} Rs)`;
+                resultStyle = "bg-red-600";
+            }
+
+            return (
+                <div className="p-8 bg-gray-900 rounded-xl shadow-2xl text-center text-white max-w-lg mx-auto">
+                    <h2 className="text-4xl font-extrabold mb-4 text-indigo-400">Match Over!</h2>
+                    <div className={`p-4 rounded-lg text-2xl font-bold mb-6 ${resultStyle}`}>
+                        {resultMessage}
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 text-left mb-6 border-t pt-4 border-gray-700">
+                        <div className="font-semibold text-gray-400">Your Score:</div>
+                        <div className="font-bold text-3xl text-green-400">{match[userRole].score}</div>
+                        <div className="font-semibold text-gray-400">Opponent Score:</div>
+                        <div className="font-bold text-3xl text-red-400">{opponent.score}</div>
+                    </div>
+                    <button 
+                        onClick={() => setMatchId(null)} 
+                        className="w-full py-3 px-6 bg-indigo-500 hover:bg-indigo-600 transition duration-300 rounded-lg text-white font-semibold"
+                    >
+                        Back to Lobby
+                    </button>
+                </div>
+            );
+          }
+
+          const currentQIndex = match.currentQIndex || 0;
+          const currentQ = match.questions[currentQIndex];
+          const answered = match[userRole]?.answers?.[currentQIndex] !== undefined && match[userRole]?.answers?.[currentQIndex] !== null;
+          const opponentAnswered = match[opponentRole]?.answers?.[currentQIndex] !== undefined && match[opponentRole]?.answers?.[currentQIndex] !== null;
+
+          return (
+            <div className="p-4 sm:p-8 bg-gray-900/95 rounded-xl shadow-2xl backdrop-blur-sm text-white max-w-xl mx-auto">
+              <div className="flex justify-between items-center mb-6 border-b pb-4 border-indigo-700">
+                <h3 className="text-xl font-bold text-indigo-400">Question {currentQIndex + 1} of {QUESTION_COUNT}</h3>
+                <div className={`text-3xl font-extrabold p-2 rounded-lg ${timeRemaining <= 5 ? 'bg-red-500' : 'bg-indigo-600'}`}>
+                  {timeRemaining}s
+                </div>
+              </div>
+
+              <p className="text-lg mb-6 font-medium text-gray-100">{currentQ.q}</p>
+
+              <div className="space-y-3 mb-6">
+                {currentQ.options.map((option, index) => (
+                  <button
+                    key={index}
+                    onClick={() => !answered && setSelectedOption(option)}
+                    disabled={answered}
+                    className={`w-full text-left p-3 rounded-lg border-2 transition duration-200 
+                      ${answered ? 'cursor-not-allowed' : 'hover:bg-indigo-700 hover:border-indigo-500'}
+                      ${selectedOption === option ? 'bg-indigo-600 border-indigo-400 ring-2 ring-indigo-300' : 'bg-gray-700 border-gray-600'}
+                    `}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={() => handleSubmitAnswer(selectedOption)}
+                disabled={answered || !selectedOption || timeRemaining === 0}
+                className="w-full py-3 bg-green-500 hover:bg-green-600 transition duration-300 rounded-lg text-white text-lg font-bold disabled:bg-gray-500 disabled:cursor-not-allowed"
+              >
+                {answered ? 'Waiting for Opponent...' : 'Submit Answer'}
+              </button>
+              
+              <div className="flex justify-between mt-4 text-sm text-gray-400">
+                <span>Your Score: <span className="text-white font-semibold">{match[userRole].score}</span></span>
+                <span>Opponent Status: {opponentAnswered ? <span className="text-green-400">Answered</span> : <span className="text-red-400">Waiting</span>}</span>
+              </div>
+            </div>
+          );
+        };
+
+        const App = () => {
+          const { userId, displayName, balance, isAuthReady, updateBalance, error, db, signInWithGoogle, handleSignOut } = useFirebase();
+          const [matchId, setMatchId] = React.useState(null);
+
+          if (!firebaseConfig) {
+            return <div className="text-center p-8 text-red-400">Error: Firebase configuration is missing.</div>;
+          }
+
+          if (error) {
+            return <div className="text-center p-8 text-red-400">Authentication/Database Error: {error}</div>;
+          }
+
+          if (!isAuthReady) {
+            return (
+              <div className="min-h-screen flex items-center justify-center bg-gray-900">
+                <div className="text-center text-white">
+                  <svg className="animate-spin h-8 w-8 text-indigo-400 mx-auto mb-3" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Loading Platform...
+                </div>
+              </div>
+            );
+          }
+          
+          const headerContent = userId ? (
+            <div className="flex justify-between items-center mt-4 pt-4 border-t border-gray-700">
+                <div className="flex items-center text-sm text-gray-300">
+                    <span className="font-semibold text-indigo-300 mr-2">Welcome:</span>
+                    <span className="text-white font-medium truncate max-w-[100px] sm:max-w-none">{displayName}</span>
+                </div>
+                <div className="flex items-center space-x-4">
+                    <div className="text-xl font-bold text-green-400 bg-gray-700 px-3 py-1 rounded-full shadow-inner">
+                        {balance} Rs
+                    </div>
+                    <button 
+                        onClick={handleSignOut} 
+                        className="signout-button flex items-center text-sm text-red-400 hover:text-red-300 transition duration-150"
+                        title="Sign Out"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-1 transition-transform">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3-9 4.5 4.5-4.5 4.5m0-9H8" />
+                        </svg>
+                        Sign Out
+                    </button>
+                </div>
+            </div>
+          ) : null;
+
+          return (
+            <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-4 font-inter">
+              <header className="w-full max-w-xl text-white mb-8 p-4 bg-gray-800 rounded-xl shadow-lg">
+                <h1 className="text-4xl font-extrabold text-center text-indigo-400 mb-2">MedQuiz Duel</h1>
+                <p className="text-sm text-center text-gray-400">Compete with your peers for bragging rights and virtual Rs!</p>
+                {headerContent}
+              </header>
+
+              {matchId ? (
+                <Game
+                  userId={userId}
+                  db={db}
+                  matchId={matchId}
+                  setMatchId={setMatchId}
+                  updateBalance={updateBalance}
+                />
+              ) : (
+                <Matchmaking
+                  userId={userId}
+                  db={db}
+                  balance={balance}
+                  updateBalance={updateBalance}
+                  setMatchId={setMatchId}
+                  signInWithGoogle={signInWithGoogle}
+                />
+              )}
+            </div>
+          );
+        };
+        
+        window.renderApp = () => {
+            const container = document.getElementById('root');
+            if (container) {
+                ReactDOM.createRoot(container).render(<App />);
+            } else {
+                console.error("Root element not found.");
+            }
+        };
+    </script>
+</body>
+</html>
+
         /* Ensures the font is applied */
         html, body {
             font-family: 'Inter', sans-serif;
