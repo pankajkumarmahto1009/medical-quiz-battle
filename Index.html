@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { 
-  getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, query, limit, where, getDocs, runTransaction, getDoc
+  getFirestore, doc, setDoc, updateDoc, onSnapshot, collection, query, limit, where, getDocs, runTransaction, deleteDoc 
 } from 'firebase/firestore';
 
 // --- CONFIGURATION AND DATA ---
@@ -151,20 +151,19 @@ const useFirebase = () => {
 const Matchmaking = ({ userId, db, balance, updateBalance, setMatchId }) => {
   const [isSearching, setIsSearching] = useState(false);
   const [lobbyDocId, setLobbyDocId] = useState(null);
-  const [insufficientFunds, setInsufficientFunds] = useState(false); // New state for alert replacement
+  const [insufficientFunds, setInsufficientFunds] = useState(false); 
 
   const lobbyRef = useMemo(() => collection(db, `artifacts/${appId}/public/data/quiz_lobby`), [db]);
   const matchesRef = useMemo(() => collection(db, `artifacts/${appId}/public/data/quiz_matches`), [db]);
 
   const enterLobby = useCallback(async () => {
-    // Replaced alert() with state update
     if (balance < ENTRY_FEE) {
       setInsufficientFunds(true);
       setTimeout(() => setInsufficientFunds(false), 3000); 
       return;
     }
     
-    setInsufficientFunds(false); // Clear previous error
+    setInsufficientFunds(false);
 
     setIsSearching(true);
     const success = await updateBalance(-ENTRY_FEE);
@@ -180,11 +179,11 @@ const Matchmaking = ({ userId, db, balance, updateBalance, setMatchId }) => {
       const opponentSnapshot = await getDocs(q);
 
       if (!opponentSnapshot.empty) {
-        // MATCH FOUND!
+        // MATCH FOUND! (I am Player 2)
         const opponentDoc = opponentSnapshot.docs[0];
         const opponentId = opponentDoc.data().userId;
 
-        // Immediately update the opponent's lobby entry to prevent multiple matches
+        // Update the opponent's lobby entry status to 'matched' (This is allowed by the security rule for authenticated users)
         await setDoc(doc(lobbyRef, opponentDoc.id), { userId: opponentId, status: 'matched' }, { merge: true });
 
         // 2. Create the new match document
@@ -192,24 +191,25 @@ const Matchmaking = ({ userId, db, balance, updateBalance, setMatchId }) => {
         const shuffledQuestions = [...MEDICAL_QUESTIONS].sort(() => 0.5 - Math.random()).slice(0, QUESTION_COUNT);
 
         await setDoc(newMatchRef, {
-          player1: { id: userId, score: 0, answers: {} },
-          player2: { id: opponentId, score: 0, answers: {} },
+          player1: { id: opponentId, score: 0, answers: {} }, // Opponent is Player 1
+          player2: { id: userId, score: 0, answers: {} },    // I am Player 2
           questions: shuffledQuestions,
           currentQIndex: 0,
           status: 'active',
           startTime: Date.now(),
           lastActionTime: Date.now(),
-          turn: userId,
+          turn: opponentId, // Player 1 goes first conceptually
           entryFee: ENTRY_FEE,
           winnerPrize: WINNER_PRIZE,
         });
 
-        // 3. Delete the opponent's lobby document (cleanup)
-        await setDoc(doc(lobbyRef, opponentDoc.id), { status: 'deleted' });
-
+        // 3. Cleanup for Player 2: Set matchId and stop searching
         setMatchId(newMatchRef.id);
+        setIsSearching(false);
+        setLobbyDocId(null); // Clear lobby ID state
+
       } else {
-        // NO MATCH FOUND - Enter the lobby
+        // NO MATCH FOUND - Enter the lobby (I am Player 1)
         const newLobbyRef = doc(lobbyRef);
         await setDoc(newLobbyRef, { userId: userId, timestamp: Date.now(), status: 'waiting' });
         setLobbyDocId(newLobbyRef.id);
@@ -222,27 +222,48 @@ const Matchmaking = ({ userId, db, balance, updateBalance, setMatchId }) => {
     }
   }, [userId, db, balance, updateBalance, lobbyRef, matchesRef, setMatchId]);
 
-  // Listener for match creation (if the current user is waiting in the lobby)
+  // Listener for match creation (if the current user is waiting in the lobby - Player 1 logic)
   useEffect(() => {
     if (!lobbyDocId || !db) return;
 
-    const unsubscribe = onSnapshot(doc(lobbyRef, lobbyDocId), async (docSnapshot) => {
-      if (!docSnapshot.exists() || docSnapshot.data().status === 'deleted') {
-        // Lobby entry deleted by opponent who created the match
-        // Now search for the created match where I am player2
-        const q = query(matchesRef, where("player2.id", "==", userId), where("status", "==", 'active'), limit(1));
+    const lobbyDocRef = doc(lobbyRef, lobbyDocId);
+
+    const unsubscribe = onSnapshot(lobbyDocRef, async (docSnapshot) => {
+      // 1. Check if the opponent (Player 2) has updated my status to 'matched'
+      if (docSnapshot.exists() && docSnapshot.data().status === 'matched') {
+        
+        // 2. Search for the created match where I am player1
+        // (Note: If Player 1 created the lobby, they are assigned player1 in the match document)
+        const q = query(matchesRef, where("player1.id", "==", userId), where("status", "==", 'active'), limit(1));
         const matchSnapshot = await getDocs(q);
+        
         if (!matchSnapshot.empty) {
-          setMatchId(matchSnapshot.docs[0].id);
-          // Cleanup local state
+          const newMatchId = matchSnapshot.docs[0].id;
+          setMatchId(newMatchId);
+          
+          // 3. **SECURITY RULE COMPLIANCE**: Player 1 deletes their OWN lobby document.
+          try {
+            await deleteDoc(lobbyDocRef); 
+          } catch(e) {
+            console.error("Failed to delete own lobby document (expected if already deleted):", e);
+          }
+          
+          // 4. Cleanup local state
           setIsSearching(false);
           setLobbyDocId(null);
         }
       }
     }, (e) => console.error("Lobby listener error:", e));
 
-    return () => unsubscribe();
-  }, [lobbyDocId, userId, db, lobbyRef, matchesRef, setMatchId]);
+    // Cleanup: If the component unmounts while searching, try to delete the entry
+    return () => {
+      unsubscribe();
+      if (lobbyDocId && auth.currentUser) {
+          // Attempt to delete own entry if still waiting
+          deleteDoc(lobbyDocRef).catch(() => {}); 
+      }
+    };
+  }, [lobbyDocId, userId, db, lobbyRef, matchesRef, setMatchId, auth]);
 
   // Check if user is already in an active match
   useEffect(() => {
@@ -327,8 +348,16 @@ const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
 
         // Reset option selection when the question index changes
         const currentQIndex = data.currentQIndex || 0;
-        const myAnswer = data[userRole]?.answers?.[currentQIndex];
-        setSelectedOption(myAnswer || null);
+        // userRole might be null for a moment if listener fires before role is set, use temporary check
+        const myRole = data.player1.id === userId ? 'player1' : data.player2.id === userId ? 'player2' : null;
+
+        if (myRole) {
+            const myAnswer = data[myRole]?.answers?.[currentQIndex];
+            setSelectedOption(myAnswer || null);
+        } else {
+             // If we can't determine the role, it's an error state
+             console.error("Could not determine user role in match.");
+        }
         
       } else {
         // Match document was deleted/finished (should be handled by finalization)
@@ -339,12 +368,19 @@ const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
     });
 
     return () => unsubscribe();
-  }, [matchRef, userId, setMatchId, userRole]);
+  }, [matchRef, userId, setMatchId]);
 
   // Timer Logic
   useEffect(() => {
-    if (!match || match.status !== 'active') return;
+    if (!match || match.status !== 'active' || !userRole) return;
 
+    // Reset selected option when question changes (manual update if not done by listener)
+    const currentQIndex = match.currentQIndex || 0;
+    const myAnswer = match[userRole]?.answers?.[currentQIndex];
+    if (selectedOption !== myAnswer) {
+        setSelectedOption(myAnswer || null);
+    }
+    
     const questionStartTime = match.lastActionTime;
     const interval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - questionStartTime) / 1000);
@@ -355,81 +391,59 @@ const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
       if (remaining <= 0) {
         clearInterval(interval);
         // Automatically submit 'No Answer' if time runs out and no selection was made
-        if (!selectedOption) {
+        if (match[userRole]?.answers?.[currentQIndex] === undefined) {
           handleSubmitAnswer(null);
-        } else {
-            // If an option was selected but not submitted (edge case), submit the selected one
-            handleSubmitAnswer(selectedOption);
         }
       }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [match?.lastActionTime, match?.status, selectedOption]);
+  }, [match?.lastActionTime, match?.status, match?.currentQIndex, userRole]);
 
 
   const handleSubmitAnswer = useCallback(async (answer) => {
-    if (!matchRef || !match || match.status !== 'active' || selectedOption) return;
+    // Check if the answer has already been submitted for the current question
+    if (!matchRef || !match || match.status !== 'active' || match[userRole]?.answers?.[match.currentQIndex] !== undefined) return;
 
     const currentQ = match.questions[match.currentQIndex];
     const isCorrect = answer === currentQ.answer;
-
-    const updatedAnswers = {
-        ...match[userRole].answers,
-        [match.currentQIndex]: answer,
-    };
-
-    // Calculate new score: 1 point for a correct answer
-    const newScore = match[userRole].score + (isCorrect ? 1 : 0);
-
-    try {
-        await updateDoc(matchRef, {
-            [`${userRole}.answers`]: updatedAnswers,
-            [`${userRole}.score`]: newScore,
-            lastActionTime: Date.now(), // Update action time
-        });
-
-        setSelectedOption(answer);
-
-        // Check if both players have answered
-        const opponentRole = userRole === 'player1' ? 'player2' : 'player1';
-        const opponentAnswered = match[opponentRole]?.answers?.[match.currentQIndex];
-
-        if (opponentAnswered || match.currentQIndex >= QUESTION_COUNT - 1) {
-            // Both answered or end of quiz, move to next state
-            await finalizeMatchState(opponentRole, newScore, updatedAnswers);
-        }
-
-    } catch (e) {
-      console.error("Answer submission error:", e);
-    }
-  }, [matchRef, match, userRole, selectedOption]);
-
-
-  // Logic to move to the next question or finalize the match
-  const finalizeMatchState = useCallback(async (opponentRole, myNewScore, myNewAnswers) => {
-    const nextQIndex = match.currentQIndex + 1;
-    const opponentScore = match[opponentRole].score;
-    const opponentAnswered = match[opponentRole]?.answers?.[match.currentQIndex];
 
     // Use transaction to ensure sequential update logic
     try {
         await runTransaction(db, async (transaction) => {
             const matchDoc = await transaction.get(matchRef);
             if (!matchDoc.exists() || matchDoc.data().status !== 'active') {
-                return; // Match already finalized
+                return; 
             }
             const currentMatch = matchDoc.data();
             const currentQIndex = currentMatch.currentQIndex;
-            const currentP1Answers = currentMatch.player1.answers;
-            const currentP2Answers = currentMatch.player2.answers;
 
-            // Re-check if both players have submitted for the current question
-            // We use the freshest data from the transaction
-            const p1HasAnswered = currentP1Answers.hasOwnProperty(currentQIndex) || currentMatch.player1.id === userId;
-            const p2HasAnswered = currentP2Answers.hasOwnProperty(currentQIndex) || currentMatch.player2.id === userId;
+            // Prevent double submission via race condition
+            if (currentMatch[userRole].answers.hasOwnProperty(currentQIndex)) {
+                return; 
+            }
 
-            if (p1HasAnswered && p2HasAnswered) {
+            const updatedAnswers = {
+                ...currentMatch[userRole].answers,
+                [currentQIndex]: answer,
+            };
+
+            const newScore = currentMatch[userRole].score + (isCorrect ? 1 : 0);
+            
+            // Update my data
+            transaction.update(matchRef, {
+                [`${userRole}.answers`]: updatedAnswers,
+                [`${userRole}.score`]: newScore,
+                lastActionTime: Date.now(),
+            });
+
+            // Check if both players have answered (using freshest data)
+            const opponentRole = userRole === 'player1' ? 'player2' : 'player1';
+            const opponentAnswered = currentMatch[opponentRole].answers.hasOwnProperty(currentQIndex);
+
+            if (opponentAnswered) {
+                const nextQIndex = currentQIndex + 1;
+
                 if (nextQIndex < QUESTION_COUNT) {
                     // Move to next question
                     transaction.update(matchRef, {
@@ -437,10 +451,10 @@ const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
                         lastActionTime: Date.now(),
                     });
                 } else {
-                    // Finalize Game
+                    // Finalize Game (scores are already updated via transaction)
                     let winnerId = null;
-                    const finalP1Score = currentMatch.player1.score + (userRole === 'player1' && currentMatch.player1.id === userId ? (myNewScore - currentMatch.player1.score) : 0);
-                    const finalP2Score = currentMatch.player2.score + (userRole === 'player2' && currentMatch.player2.id === userId ? (myNewScore - currentMatch.player2.score) : 0);
+                    const finalP1Score = currentMatch.player1.score + (userRole === 'player1' ? (newScore - currentMatch.player1.score) : 0);
+                    const finalP2Score = currentMatch.player2.score + (userRole === 'player2' ? (newScore - currentMatch.player2.score) : 0);
 
                     if (finalP1Score > finalP2Score) {
                         winnerId = currentMatch.player1.id;
@@ -451,7 +465,6 @@ const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
                     transaction.update(matchRef, {
                         status: 'completed',
                         winnerId: winnerId,
-                        // Ensure final scores are recorded
                         'player1.score': finalP1Score,
                         'player2.score': finalP2Score,
                         completedAt: Date.now(),
@@ -464,18 +477,17 @@ const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
                 }
             }
         });
+
     } catch (e) {
-        console.error("Finalization transaction error:", e);
+      console.error("Answer submission transaction error:", e);
     }
-  }, [matchRef, match, userRole, db, userId]);
+  }, [matchRef, match, userRole, db]);
+
 
   // Award the winner (called only once upon match completion)
   const awardWinner = useCallback(async (winnerId) => {
     if (winnerId) {
-        const winnerRef = doc(db, `artifacts/${appId}/users/${winnerId}/balances/main`);
-        // Award the prize amount + the platform cut (20 Rs) - the entry fee (10 Rs) = 10 Rs gain + 5 Rs cut = 15 Rs award
-        // Since we already deducted 10 Rs entry fee, we award the winner 15 Rs and the platform "keeps" the 5 Rs difference.
-        // Net effect: Winner +5, Loser -10, Platform +5 (as intended: 15 to winner, 5 to platform).
+        // Award 15 Rs. Since 10 Rs was already deducted as entry fee, this is a net +5 Rs gain.
         try {
             await updateBalance(WINNER_PRIZE);
         } catch (e) {
@@ -490,12 +502,10 @@ const Game = ({ userId, db, matchId, setMatchId, updateBalance }) => {
     return <div className="text-center p-8 text-white">Loading Match Data...</div>;
   }
 
-  if (!match) {
-    return <div className="text-center p-8 text-white">Match not found or was cancelled.</div>;
+  if (!match || !userRole) {
+    return <div className="text-center p-8 text-white">Match data is unavailable or incomplete.</div>;
   }
 
-  const p1 = match.player1;
-  const p2 = match.player2;
   const opponentRole = userRole === 'player1' ? 'player2' : 'player1';
   const opponent = match[opponentRole];
 
