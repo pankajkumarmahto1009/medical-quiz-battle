@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Variables ---
+    function user_is_authenticated() {
+      return request.auth != null;
+    }
+
+    function user_is_owner(userId) {
+      return user_is_authenticated() && request.auth.uid == userId;
+    }
+
+    // --- Private User Data (Balances) ---
+    // Users can only read and write their own balance documents.
+    // This requires the user to be signed in (request.auth != null).
+    match /artifacts/{appId}/users/{userId}/balances/main {
+      allow read, write: if user_is_owner(userId);
+    }
+
+    // --- Public Matchmaking Lobby ---
+    // Users can create (write) and read lobby entries.
+    // Crucially, users can ONLY update or delete their OWN entry.
+    match /artifacts/{appId}/public/data/quiz_lobby/{lobbyId} {
+      allow create: if user_is_authenticated();
+      // Read allows players to find opponents
+      allow read: if user_is_authenticated();
+      // Update/Delete requires the user to own the lobby document
+      allow update, delete: if user_is_owner(resource.data.userId);
+    }
+
+    // --- Public Match Documents ---
+    // Matches are public data, but modifications are restricted to participants.
+    match /artifacts/{appId}/public/data/quiz_matches/{matchId} {
+
+      function user_is_participant() {
+        return user_is_authenticated() && (
+          resource.data.player1.id == request.auth.uid ||
+          resource.data.player2.id == request.auth.uid
+        );
+      }
+      
+      // Read is allowed for participants (and nobody else).
+      allow read: if user_is_participant();
+
+      // Create: Only possible if the game starts (matchmaker creates it).
+      allow create: if user_is_participant();
+      
+      // Updates are only allowed by participants and if the match is still 'active'.
+      // Participants can only update their own score/answers within the transaction logic.
+      allow update: if user_is_participant() && resource.data.status == 'active';
+    }
+  }
+}
